@@ -123,6 +123,46 @@ function formatSeconds(total) {
   return `${sign}${h}h ${m}m ${s}s`;
 }
 
+// 尝试关闭新手引导教程弹窗（Shepherd.js 蒙层，"MAIN MENU / Step x of 6"，会挡住点击）
+async function tryDismissOnboardingTour(page) {
+  const dismissSelectors = [
+    'a:has-text("Skip for now")',
+    'button:has-text("Skip for now")',
+    'text=Skip for now',
+    '.shepherd-cancel-icon',
+    'button[aria-label="Close Tour" i]',
+  ];
+  let dismissed = false;
+  for (const sel of dismissSelectors) {
+    try {
+      const el = page.locator(sel).first();
+      if (await el.isVisible({ timeout: 1000 })) {
+        await el.click({ timeout: 3000 }).catch(() => {});
+        console.log(`✅ 已关闭新手引导弹窗: ${sel}`);
+        dismissed = true;
+        await page.waitForTimeout(500);
+      }
+    } catch (e) {
+      // 继续尝试下一个选择器
+    }
+  }
+  // 兜底：如果上面都没找到，直接按 Escape 试一下
+  if (!dismissed) {
+    try {
+      const hasShepherd = await page
+        .locator('.shepherd-modal-overlay-container, dialog.shepherd-element')
+        .first()
+        .isVisible({ timeout: 500 });
+      if (hasShepherd) {
+        await page.keyboard.press('Escape').catch(() => {});
+      }
+    } catch (e) {
+      // 没有引导层，忽略
+    }
+  }
+  return dismissed;
+}
+
 // 尝试关闭可能出现的广告弹窗/遮罩层（通用选择器，不同广告网络样式不同，按需补充）
 async function tryCloseAdPopup(page) {
   const closeSelectors = [
@@ -216,7 +256,14 @@ async function tryCloseAdPopup(page) {
     await page.waitForTimeout(2000);
     await shot(page, 'server_page_loaded');
 
-    // ===== 第4步：1~10秒内持续检测并关闭广告弹窗 =====
+    // 关闭可能出现的新手引导教程蒙层（会挡住后续所有点击）
+    console.log('▶️ 关闭新手引导教程（如果有）...');
+    for (let i = 0; i < 3; i++) {
+      const d = await tryDismissOnboardingTour(page);
+      if (!d) break;
+      await page.waitForTimeout(800);
+    }
+    await shot(page, 'onboarding_tour_dismissed');
     console.log('▶️ 第4步: 检测广告弹窗（最多10秒）...');
     let closedAny = false;
     for (let i = 0; i < 10; i++) {
@@ -251,10 +298,12 @@ async function tryCloseAdPopup(page) {
     } else {
       // ===== 第6步：点击 Renew 按钮 =====
       console.log('▶️ 第6步: 点击 Renew 按钮...');
+      await tryDismissOnboardingTour(page); // 保险起见再关一次，防止引导层重新出现挡住点击
       try {
-        await page.getByRole('button', { name: 'Renew', exact: false }).click({ timeout: 15000 });
+        // 限定只匹配真正的 <button>，避免匹配到 "Renew Server" 标题文字
+        await page.getByRole('button', { name: /^renew$/i }).first().click({ timeout: 15000 });
       } catch (e) {
-        await page.getByText('Renew', { exact: false }).first().click({ timeout: 15000 });
+        await page.locator('button:has-text("Renew")').first().click({ timeout: 15000 });
       }
       await page.waitForTimeout(2000);
       await shot(page, 'clicked_renew');
