@@ -1,0 +1,45 @@
+name: GODLIKE 服务器自动续期
+
+on:
+  # 手动触发
+  workflow_dispatch: {}
+  # 供 cron-job.org 通过 repository_dispatch 远程触发
+  repository_dispatch:
+    types: [godlike-renew]
+
+jobs:
+  renew:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 安装 Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: 安装依赖
+        run: npm install
+
+      - name: 安装 Playwright 浏览器
+        run: npx playwright install --with-deps chromium
+
+      - name: 执行续期脚本
+        env:
+          PANEL_USERNAME: ${{ secrets.PANEL_USERNAME }}
+          PANEL_PASSWORD: ${{ secrets.PANEL_PASSWORD }}
+          SERVER_URL: ${{ secrets.SERVER_URL }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          AD_WAIT_SECONDS: '240'
+        run: node godlike_renew.js
+
+      - name: 上传截图(Artifact)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: screenshots-${{ github.run_number }}
+          path: screenshots/
+          retention-days: 7
