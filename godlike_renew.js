@@ -5,7 +5,13 @@
 //
 // 每一步都会保存截图到 ./screenshots 目录，工作流会把这个目录作为 Artifact 上传
 
-const { chromium } = require('playwright');
+// 用 playwright-extra + stealth 插件启动 chromium：YouTube 会通过 navigator.webdriver、
+// CDP 控制特征等信号识别自动化浏览器并弹出"Sign in to confirm you're not a bot"验证墙，
+// stealth 插件会隐藏掉这些常见指纹，降低被识别概率（但不是100%保证，IP信誉同样关键，见下方代理配置）
+const { chromium } = require('playwright-extra');
+const stealth = require('puppeteer-extra-plugin-stealth')();
+chromium.use(stealth);
+
 const fs = require('fs');
 const path = require('path');
 const https = require('https');
@@ -20,6 +26,12 @@ const SERVER_URL = process.env.SERVER_URL || '';
 const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN || '';
 const TG_CHAT_ID = process.env.TG_CHAT_ID || '';
 const AD_WAIT_SECONDS = parseInt(process.env.AD_WAIT_SECONDS || '240', 10);
+// 可选：住宅代理配置。GitHub Actions 用的是数据中心 IP，YouTube 对这类 IP 反机器人检测更激进，
+// 如果 stealth 插件还是过不了"Sign in to confirm you're not a bot"，建议配一个住宅代理。
+// 不填这三个变量就不会启用代理，按原来的方式直接连
+const PROXY_SERVER = process.env.PROXY_SERVER || ''; // 例如 http://1.2.3.4:8080
+const PROXY_USERNAME = process.env.PROXY_USERNAME || '';
+const PROXY_PASSWORD = process.env.PROXY_PASSWORD || '';
 
 const SHOT_DIR = path.join(__dirname, 'screenshots');
 if (!fs.existsSync(SHOT_DIR)) fs.mkdirSync(SHOT_DIR, { recursive: true });
@@ -197,11 +209,19 @@ async function tryCloseAdPopup(page) {
     process.exit(1);
   }
 
-  const browser = await chromium.launch({ headless: true });
+  const launchOptions = { headless: true };
+  if (PROXY_SERVER) {
+    launchOptions.proxy = { server: PROXY_SERVER };
+    if (PROXY_USERNAME) launchOptions.proxy.username = PROXY_USERNAME;
+    if (PROXY_PASSWORD) launchOptions.proxy.password = PROXY_PASSWORD;
+    console.log('🌐 已启用代理: ' + PROXY_SERVER);
+  }
+  const browser = await chromium.launch(launchOptions);
   const context = await browser.newContext({
     viewport: { width: 1600, height: 1000 },
     userAgent:
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+    locale: 'en-US',
   });
 
   // 广告网络经常会弹出新标签页，监听一下避免卡住主流程（不主动关闭，只记录）
