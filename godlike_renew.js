@@ -331,6 +331,47 @@ async function tryCloseAdPopup(page) {
       }
       await shot(page, played ? 'ad_play_clicked' : 'ad_play_button_not_found');
 
+      // ===== 第7.5步：在 "Watch Video to Renew" 弹窗中点击视频缩略图中间的真正播放按钮 =====
+      console.log('▶️ 第7.5步: 点击视频缩略图开始播放...');
+      const videoPlayCandidates = [
+        page.locator('button.lty-playbtn'),
+        page.locator('[class*="lty-playbtn" i]'),
+        page.locator('lite-youtube'),
+        page.locator('[aria-label="Play" i]'),
+        page.locator('[class*="play-button" i]'),
+        page.locator('[class*="play-btn" i]'),
+      ];
+      let videoStarted = false;
+      for (const cand of videoPlayCandidates) {
+        try {
+          const el = cand.first();
+          if (await el.isVisible({ timeout: 2000 })) {
+            await el.click({ timeout: 5000 });
+            videoStarted = true;
+            console.log('✅ 已点击视频播放按钮');
+            break;
+          }
+        } catch (e) {
+          // 继续尝试下一个候选
+        }
+      }
+      // 兜底：上面的选择器都没匹配到的话，直接点击 "Watch Video to Renew" 弹窗里缩略图区域的中心坐标
+      if (!videoStarted) {
+        try {
+          const modal = page.getByText('Watch Video to Renew', { exact: false }).first();
+          const box = await modal.boundingBox();
+          if (box) {
+            await page.mouse.click(box.x + box.width / 2, box.y + 180);
+            videoStarted = true;
+            console.log('✅ 已通过坐标点击视频区域中心（兜底方案）');
+          }
+        } catch (e) {
+          console.log('⚠️ 无法定位视频播放按钮: ' + e.message);
+        }
+      }
+      await page.waitForTimeout(2000);
+      await shot(page, videoStarted ? 'video_play_clicked' : 'video_play_not_found');
+
       // ===== 第8步：等待广告播放约240秒 =====
       console.log(`▶️ 第8步: 等待广告播放 ${AD_WAIT_SECONDS} 秒...`);
       await page.waitForTimeout(AD_WAIT_SECONDS * 1000);
