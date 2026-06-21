@@ -356,44 +356,108 @@ async function tryCloseAdPopup(page) {
       // 而是纯 HTML/CSS 做的假缩略图（点击后才会真正注入播放）。
       // 思路改成：用视频标题这段唯一可见文字定位，再一层层往上找父容器，
       // 找到第一个"宽高足够大、看起来是整个缩略图"的容器，点它的正中心。
-      // ===== 改进后的第7.5步：精准定位并点击视频播放按钮 =====
-console.log('▶️ 第7.5步: 开始尝试精准点击视频播放按钮...');
-let videoStarted = false;
+      console.log('▶️ 第7.5步: 点击视频开始播放...');
+      let videoStarted = false;
 
-// 定义指向 YouTube iframe 的定位器
-const ytFrame = page.frameLocator('iframe[src*="youtube.com/embed/"]');
-
-try {
-  // 1. 优先尝试寻找播放按钮元素 (通常带有 aria-label="Play")
-  const playButton = ytFrame.locator('button[aria-label="Play" i]');
-  
-  if (await playButton.isVisible({ timeout: 5000 })) {
-    console.log('✅ 发现播放按钮，准备点击...');
-    await playButton.click({ force: true });
-    videoStarted = true;
-  } else {
-    // 2. 如果找不到按钮，说明可能被“验证墙”挡住，尝试点击播放器中心区域
-    console.log('⚠️ 未直接找到播放按钮，尝试点击视频区域中心...');
-    const playerContainer = ytFrame.locator('div.ytp-player'); // YouTube 播放器主容器
-    
-    if (await playerContainer.isVisible()) {
-      const box = await playerContainer.boundingBox();
-      if (box) {
-        await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
-        await page.mouse.down();
-        await page.waitForTimeout(200); // 模拟人类按压
-        await page.mouse.up();
-        videoStarted = true;
+      // 诊断信息：打印页面当前所有 frame 的地址，留着方便确认
+      try {
+        const allFrames = page.frames();
+        console.log(`ℹ️ 当前页面共有 ${allFrames.length} 个 frame:`);
+        allFrames.forEach((f, i) => console.log(`   [${i}] ${f.url() || '(空白frame)'}`));
+      } catch (e) {
+        // 忽略
       }
-    }
-  }
-} catch (e) {
-  console.log('⚠️ 精准点击逻辑执行异常: ' + e.message);
-}
 
-// 给予一定时间等待视频加载状态变化
-await page.waitForTimeout(4000); 
-await shot(page, videoStarted ? 'video_play_clicked_v2' : 'video_play_failed_v2');
+      // 方案一：以视频标题文字为锚点，向上查找尺寸足够大的祖先容器（即整个缩略图区域），点击其中心
+      try {
+        let anchor = page.getByText('TODO LO QUE DEBES SABER', { exact: false }).first();
+        let videoBox = null;
+        let foundLevel = -1;
+        for (let level = 0; level < 8; level++) {
+          const box = await anchor.boundingBox().catch(() => null);
+          if (box && box.width >= 400 && box.height >= 200) {
+            videoBox = box;
+            foundLevel = level;
+            break;
+          }
+          anchor = anchor.locator('xpath=..');
+        }
+        if (videoBox) {
+          await page.mouse.click(videoBox.x + videoBox.width / 2, videoBox.y + videoBox.height / 2);
+          videoStarted = true;
+          console.log(
+            `✅ 已点击视频缩略图区域（向上找了 ${foundLevel} 层），坐标 (${Math.round(videoBox.x + videoBox.width / 2)}, ${Math.round(videoBox.y + videoBox.height / 2)})，尺寸 ${Math.round(videoBox.width)}x${Math.round(videoBox.height)}`
+          );
+        } else {
+          console.log('⚠️ 没能找到足够大的缩略图容器（向上找了8层都不够大）');
+        }
+      } catch (e) {
+        console.log('⚠️ 以标题文字定位缩略图失败: ' + e.message.split('\n')[0]);
+      }
+
+      // 方案二：如果方案一没找到视频标题文字（比如视频换了），尝试找 YouTube frame（万一点了之后才会出现）
+      if (!videoStarted) {
+        try {
+          const ytFrameHandle = page.frames().find((f) => /youtube/i.test(f.url()));
+          if (ytFrameHandle) {
+            await ytFrameHandle.click('body', { timeout: 8000 });
+            videoStarted = true;
+            console.log('✅ 已通过 frame.click(body) 点击 YouTube frame: ' + ytFrameHandle.url());
+          }
+        } catch (e) {
+          console.log('⚠️ frame.click(body) 失败: ' + e.message.split('\n')[0]);
+        }
+      }
+
+      // 方案三：遍历所有匹配 iframe[src*="youtube"] 的元素，逐个点击中心坐标（兜底）
+      if (!videoStarted) {
+        try {
+          const iframeLocators = page.locator('iframe[src*="youtube"]');
+          const count = await iframeLocators.count();
+          console.log(`ℹ️ 找到 ${count} 个 iframe[src*="youtube"]，逐个尝试点击`);
+          for (let i = 0; i < count; i++) {
+            const el = iframeLocators.nth(i);
+            const box = await el.boundingBox().catch(() => null);
+            if (box) {
+              console.log(`   [${i}] 坐标 (${Math.round(box.x + box.width / 2)}, ${Math.round(box.y + box.height / 2)}) 尺寸 ${Math.round(box.width)}x${Math.round(box.height)}`);
+              await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+              await page.waitForTimeout(1000);
+            } else {
+              console.log(`   [${i}] 不可见，跳过`);
+            }
+          }
+          videoStarted = count > 0;
+        } catch (e) {
+          console.log('⚠️ 遍历点击 iframe 失败: ' + e.message);
+        }
+      }
+
+      // 方案四：兜底，针对常见的自定义播放按钮组件 class 名
+      if (!videoStarted) {
+        const videoPlayCandidates = [
+          page.locator('button.lty-playbtn'),
+          page.locator('[class*="lty-playbtn" i]'),
+          page.locator('lite-youtube'),
+          page.locator('[aria-label="Play" i]'),
+          page.locator('[class*="play-button" i]'),
+          page.locator('[class*="play-btn" i]'),
+        ];
+        for (const cand of videoPlayCandidates) {
+          try {
+            const el = cand.first();
+            if (await el.isVisible({ timeout: 2000 })) {
+              await el.click({ timeout: 5000 });
+              videoStarted = true;
+              console.log('✅ 已点击视频播放按钮（兜底选择器）');
+              break;
+            }
+          } catch (e) {
+            // 继续尝试下一个候选
+          }
+        }
+      }
+      await page.waitForTimeout(3000);
+      await shot(page, videoStarted ? 'video_play_clicked' : 'video_play_not_found');
 
       // 验证视频是否真的在播放：对比几秒间隔内的播放进度百分比是否在变化
       // 注意：页面顶部促销横幅里也有"-50%"这种带百分号的文字，必须把搜索范围限定在 "Watch the video" 这句话附近，
