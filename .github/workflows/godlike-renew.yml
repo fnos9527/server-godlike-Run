@@ -34,6 +34,11 @@ jobs:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           AD_WAIT_SECONDS: '240'
+          # 可选：住宅代理，不配置就留空不会启用。如果 stealth 插件还是过不了 YouTube 的机器人验证，
+          # 建议配一个住宅代理（GitHub Actions 的数据中心 IP 容易被 YouTube 风控）
+          PROXY_SERVER: ${{ secrets.PROXY_SERVER }}
+          PROXY_USERNAME: ${{ secrets.PROXY_USERNAME }}
+          PROXY_PASSWORD: ${{ secrets.PROXY_PASSWORD }}
         run: node godlike_renew.js
 
       - name: 上传截图(Artifact)
