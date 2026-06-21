@@ -332,45 +332,80 @@ async function tryCloseAdPopup(page) {
       await shot(page, played ? 'ad_play_clicked' : 'ad_play_button_not_found');
 
       // ===== 第7.5步：在 "Watch Video to Renew" 弹窗中点击视频缩略图中间的真正播放按钮 =====
+      // 这个视频是真正的 YouTube <iframe>，不是自定义播放按钮组件，所以优先用 frameLocator 精确定位，
+      // 找不到再退回点击 iframe 元素本身的真实坐标（而不是标题文字的坐标，那样会点偏）
       console.log('▶️ 第7.5步: 点击视频缩略图开始播放...');
-      const videoPlayCandidates = [
-        page.locator('button.lty-playbtn'),
-        page.locator('[class*="lty-playbtn" i]'),
-        page.locator('lite-youtube'),
-        page.locator('[aria-label="Play" i]'),
-        page.locator('[class*="play-button" i]'),
-        page.locator('[class*="play-btn" i]'),
-      ];
       let videoStarted = false;
-      for (const cand of videoPlayCandidates) {
-        try {
-          const el = cand.first();
-          if (await el.isVisible({ timeout: 2000 })) {
-            await el.click({ timeout: 5000 });
-            videoStarted = true;
-            console.log('✅ 已点击视频播放按钮');
-            break;
-          }
-        } catch (e) {
-          // 继续尝试下一个候选
+
+      // 方案一：通过 frameLocator 直接点击 YouTube 播放器内部的大播放按钮
+      try {
+        const ytFrame = page.frameLocator('iframe[src*="youtube"]');
+        const ytPlayBtn = ytFrame.locator('button.ytp-large-play-button, .ytp-large-play-button');
+        if (await ytPlayBtn.first().isVisible({ timeout: 4000 })) {
+          await ytPlayBtn.first().click({ timeout: 5000 });
+          videoStarted = true;
+          console.log('✅ 已点击 YouTube 播放器内部按钮 (frameLocator)');
         }
+      } catch (e) {
+        console.log('ℹ️ frameLocator 方式未找到播放按钮，尝试坐标点击: ' + e.message);
       }
-      // 兜底：上面的选择器都没匹配到的话，直接点击 "Watch Video to Renew" 弹窗里缩略图区域的中心坐标
+
+      // 方案二：直接点击 <iframe> 元素本身所在区域的真实中心坐标（绕开跨域限制，比文字坐标更准）
       if (!videoStarted) {
         try {
-          const modal = page.getByText('Watch Video to Renew', { exact: false }).first();
-          const box = await modal.boundingBox();
+          const iframeEl = page.locator('iframe[src*="youtube"]').first();
+          const box = await iframeEl.boundingBox();
           if (box) {
-            await page.mouse.click(box.x + box.width / 2, box.y + 180);
+            await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
             videoStarted = true;
-            console.log('✅ 已通过坐标点击视频区域中心（兜底方案）');
+            console.log(`✅ 已点击视频 iframe 中心坐标 (x:${Math.round(box.x + box.width / 2)}, y:${Math.round(box.y + box.height / 2)})`);
+          } else {
+            console.log('⚠️ 找到了 iframe 但无法获取其坐标');
           }
         } catch (e) {
-          console.log('⚠️ 无法定位视频播放按钮: ' + e.message);
+          console.log('⚠️ 未找到 YouTube iframe: ' + e.message);
         }
       }
-      await page.waitForTimeout(2000);
+
+      // 方案三：兜底，针对非 iframe 的自定义播放按钮组件
+      if (!videoStarted) {
+        const videoPlayCandidates = [
+          page.locator('button.lty-playbtn'),
+          page.locator('[class*="lty-playbtn" i]'),
+          page.locator('lite-youtube'),
+          page.locator('[aria-label="Play" i]'),
+          page.locator('[class*="play-button" i]'),
+          page.locator('[class*="play-btn" i]'),
+        ];
+        for (const cand of videoPlayCandidates) {
+          try {
+            const el = cand.first();
+            if (await el.isVisible({ timeout: 2000 })) {
+              await el.click({ timeout: 5000 });
+              videoStarted = true;
+              console.log('✅ 已点击视频播放按钮（兜底选择器）');
+              break;
+            }
+          } catch (e) {
+            // 继续尝试下一个候选
+          }
+        }
+      }
+      await page.waitForTimeout(3000);
       await shot(page, videoStarted ? 'video_play_clicked' : 'video_play_not_found');
+
+      // 验证视频是否真的在播放：对比几秒间隔内的播放进度百分比是否在变化
+      try {
+        const progress1 = (await page.getByText(/^\d+%$/).first().innerText({ timeout: 3000 })).trim();
+        await page.waitForTimeout(6000);
+        const progress2 = (await page.getByText(/^\d+%$/).first().innerText({ timeout: 3000 })).trim();
+        console.log(`📊 播放进度检测: ${progress1} -> ${progress2}`);
+        if (progress1 === progress2) {
+          console.log('⚠️ 警告：播放进度没有变化，视频可能没有真正开始播放！');
+        }
+      } catch (e) {
+        console.log('⚠️ 未能读取播放进度百分比，跳过该项检测: ' + e.message);
+      }
 
       // ===== 第8步：等待广告播放约240秒 =====
       console.log(`▶️ 第8步: 等待广告播放 ${AD_WAIT_SECONDS} 秒...`);
@@ -396,9 +431,14 @@ async function tryCloseAdPopup(page) {
         }
       }
 
-      // 刷新确保倒计时是最新数据
+      // 刷新确保倒计时是最新数据，并等待页面真正渲染出内容后再截图（避免截到加载圈）
       await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
-      await page.waitForTimeout(2000);
+      try {
+        await page.getByText(/will be suspended in/i).first().waitFor({ state: 'visible', timeout: 20000 });
+      } catch (e) {
+        console.log('⚠️ 刷新后等待倒计时元素超时，可能页面加载较慢: ' + e.message);
+      }
+      await page.waitForTimeout(1500);
       await shot(page, 'final_state');
 
       // ===== 第9步：读取续期后的倒计时并对比 =====
