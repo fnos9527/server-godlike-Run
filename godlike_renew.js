@@ -332,9 +332,10 @@ async function tryCloseAdPopup(page) {
       await shot(page, played ? 'ad_play_clicked' : 'ad_play_button_not_found');
 
       // ===== 第7.5步：在 "Watch Video to Renew" 弹窗中点击视频缩略图中间的真正播放按钮 =====
-      // 这个视频是真正的 YouTube <iframe>，不是自定义播放按钮组件，所以优先用 frameLocator 精确定位，
-      // 找不到再退回点击 iframe 元素本身的真实坐标（而不是标题文字的坐标，那样会点偏）
-      console.log('▶️ 第7.5步: 点击视频缩略图开始播放...');
+      // 之前用"算坐标硬点"（page.mouse.click）的问题是：如果上面盖着别的元素，点击会被吃掉但不报错。
+      // 这次改用 Playwright 自带的元素点击（locator.click），它会自动检测目标有没有被遮挡，
+      // 被挡住的话会直接抛出错误并指出是哪个元素挡的，方便排查（跟之前定位引导层遮罩问题的思路一样）
+      console.log('▶️ 第7.5步: 点击视频开始播放...');
       let videoStarted = false;
 
       // 方案一：通过 frameLocator 直接点击 YouTube 播放器内部的大播放按钮
@@ -347,27 +348,53 @@ async function tryCloseAdPopup(page) {
           console.log('✅ 已点击 YouTube 播放器内部按钮 (frameLocator)');
         }
       } catch (e) {
-        console.log('ℹ️ frameLocator 方式未找到播放按钮，尝试坐标点击: ' + e.message);
+        console.log('ℹ️ frameLocator 方式未找到播放按钮，继续尝试其他方式');
       }
 
-      // 方案二：直接点击 <iframe> 元素本身所在区域的真实中心坐标（绕开跨域限制，比文字坐标更准）
+      // 方案二：直接点击 <iframe> 元素本身（带可点击性检测，被遮挡会报错并说明是什么挡住的）
+      if (!videoStarted) {
+        try {
+          const iframeEl = page.locator('iframe[src*="youtube"]').first();
+          await iframeEl.waitFor({ state: 'visible', timeout: 8000 });
+          await iframeEl.click({ timeout: 8000 });
+          videoStarted = true;
+          console.log('✅ 已点击 YouTube iframe（可点击性检测通过）');
+        } catch (e) {
+          console.log('⚠️ 直接点击 iframe 被拦截/失败，详细原因：');
+          console.log(e.message.split('\n').slice(0, 8).join('\n'));
+        }
+      }
+
+      // 方案三：很多"看广告解锁"组件真正响应点击的是包着 iframe 的外层容器，而不是 iframe 本身，尝试点它的父元素
+      if (!videoStarted) {
+        try {
+          const wrapper = page.locator('iframe[src*="youtube"]').first().locator('xpath=..');
+          await wrapper.click({ timeout: 8000 });
+          videoStarted = true;
+          console.log('✅ 已点击视频外层容器');
+        } catch (e) {
+          console.log('⚠️ 点击外层容器也被拦截/失败：');
+          console.log(e.message.split('\n').slice(0, 8).join('\n'));
+        }
+      }
+
+      // 方案四：最后兜底，强制点击（忽略遮挡检测）+ 坐标点击双保险
       if (!videoStarted) {
         try {
           const iframeEl = page.locator('iframe[src*="youtube"]').first();
           const box = await iframeEl.boundingBox();
           if (box) {
             await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+            await iframeEl.click({ timeout: 5000, force: true }).catch(() => {});
             videoStarted = true;
-            console.log(`✅ 已点击视频 iframe 中心坐标 (x:${Math.round(box.x + box.width / 2)}, y:${Math.round(box.y + box.height / 2)})`);
-          } else {
-            console.log('⚠️ 找到了 iframe 但无法获取其坐标');
+            console.log(`✅ 已通过强制点击兜底 (x:${Math.round(box.x + box.width / 2)}, y:${Math.round(box.y + box.height / 2)})`);
           }
         } catch (e) {
-          console.log('⚠️ 未找到 YouTube iframe: ' + e.message);
+          console.log('⚠️ 强制点击兜底也失败: ' + e.message);
         }
       }
 
-      // 方案三：兜底，针对非 iframe 的自定义播放按钮组件
+      // 方案五：兜底，针对非 iframe 的自定义播放按钮组件
       if (!videoStarted) {
         const videoPlayCandidates = [
           page.locator('button.lty-playbtn'),
@@ -394,11 +421,12 @@ async function tryCloseAdPopup(page) {
       await page.waitForTimeout(3000);
       await shot(page, videoStarted ? 'video_play_clicked' : 'video_play_not_found');
 
-      // 验证视频是否真的在播放：对比几秒间隔内的播放进度百分比是否在变化
+      // 验证视频是否真的在播放：对比几秒间隔内的播放进度百分比是否在变化（放宽匹配规则，不要求百分比独占一个元素）
       try {
-        const progress1 = (await page.getByText(/^\d+%$/).first().innerText({ timeout: 3000 })).trim();
-        await page.waitForTimeout(6000);
-        const progress2 = (await page.getByText(/^\d+%$/).first().innerText({ timeout: 3000 })).trim();
+        const pctLocator = page.locator('text=/\\d+%/').first();
+        const progress1 = (await pctLocator.innerText({ timeout: 4000 })).trim();
+        await page.waitForTimeout(8000);
+        const progress2 = (await pctLocator.innerText({ timeout: 4000 })).trim();
         console.log(`📊 播放进度检测: ${progress1} -> ${progress2}`);
         if (progress1 === progress2) {
           console.log('⚠️ 警告：播放进度没有变化，视频可能没有真正开始播放！');
