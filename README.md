@@ -17,3 +17,5 @@ Header：Authorization: Bearer <你的GitHub Personal Access Token>、
 Accept: application/vnd.github+json
 
 Body（JSON）：{"event_type": "godlike-renew"}
+
+可选PROXY_SERVER（http://1.2.3.4:8080）、PROXY_USERNAME、PROXY_PASSWORD
