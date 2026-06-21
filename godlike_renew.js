@@ -332,12 +332,14 @@ async function tryCloseAdPopup(page) {
       await shot(page, played ? 'ad_play_clicked' : 'ad_play_button_not_found');
 
       // ===== 第7.5步：在 "Watch Video to Renew" 弹窗中点击视频缩略图中间的真正播放按钮 =====
-      // 上一版确认点击没有被遮挡，但视频依然没反应——说明很可能 iframe[src*="youtube"] 匹配到了
-      // 不止一个元素，第一个未必是真正可交互的播放器（可能是用于统计/追踪的隐藏iframe凑巧也带youtube字样）
+      // 已确认这个视频不是真正的 YouTube iframe（page.frames() 里没有任何 youtube.com 的 frame），
+      // 而是纯 HTML/CSS 做的假缩略图（点击后才会真正注入播放）。
+      // 思路改成：用视频标题这段唯一可见文字定位，再一层层往上找父容器，
+      // 找到第一个"宽高足够大、看起来是整个缩略图"的容器，点它的正中心。
       console.log('▶️ 第7.5步: 点击视频开始播放...');
       let videoStarted = false;
 
-      // 诊断信息：打印页面当前所有 frame 的地址，方便确认到底有几个、点的是不是真播放器
+      // 诊断信息：打印页面当前所有 frame 的地址，留着方便确认
       try {
         const allFrames = page.frames();
         console.log(`ℹ️ 当前页面共有 ${allFrames.length} 个 frame:`);
@@ -346,22 +348,48 @@ async function tryCloseAdPopup(page) {
         // 忽略
       }
 
-      // 方案一：用 Playwright 的 Frame 对象直接点击 YouTube frame 的 body 中心
-      // （用 frame 自己的坐标系换算，比"算外层iframe元素的boundingBox再点"更准，能避开嵌套坐标偏差）
+      // 方案一：以视频标题文字为锚点，向上查找尺寸足够大的祖先容器（即整个缩略图区域），点击其中心
       try {
-        const ytFrameHandle = page.frames().find((f) => /youtube/i.test(f.url()));
-        if (ytFrameHandle) {
-          await ytFrameHandle.click('body', { timeout: 8000 });
+        let anchor = page.getByText('TODO LO QUE DEBES SABER', { exact: false }).first();
+        let videoBox = null;
+        let foundLevel = -1;
+        for (let level = 0; level < 8; level++) {
+          const box = await anchor.boundingBox().catch(() => null);
+          if (box && box.width >= 400 && box.height >= 200) {
+            videoBox = box;
+            foundLevel = level;
+            break;
+          }
+          anchor = anchor.locator('xpath=..');
+        }
+        if (videoBox) {
+          await page.mouse.click(videoBox.x + videoBox.width / 2, videoBox.y + videoBox.height / 2);
           videoStarted = true;
-          console.log('✅ 已通过 frame.click(body) 点击 YouTube frame: ' + ytFrameHandle.url());
+          console.log(
+            `✅ 已点击视频缩略图区域（向上找了 ${foundLevel} 层），坐标 (${Math.round(videoBox.x + videoBox.width / 2)}, ${Math.round(videoBox.y + videoBox.height / 2)})，尺寸 ${Math.round(videoBox.width)}x${Math.round(videoBox.height)}`
+          );
         } else {
-          console.log('⚠️ page.frames() 里没有找到 url 包含 youtube 的 frame');
+          console.log('⚠️ 没能找到足够大的缩略图容器（向上找了8层都不够大）');
         }
       } catch (e) {
-        console.log('⚠️ frame.click(body) 失败: ' + e.message.split('\n')[0]);
+        console.log('⚠️ 以标题文字定位缩略图失败: ' + e.message.split('\n')[0]);
       }
 
-      // 方案二：遍历所有匹配 iframe[src*="youtube"] 的元素，逐个点击中心坐标（可能不止一个，挨个试）
+      // 方案二：如果方案一没找到视频标题文字（比如视频换了），尝试找 YouTube frame（万一点了之后才会出现）
+      if (!videoStarted) {
+        try {
+          const ytFrameHandle = page.frames().find((f) => /youtube/i.test(f.url()));
+          if (ytFrameHandle) {
+            await ytFrameHandle.click('body', { timeout: 8000 });
+            videoStarted = true;
+            console.log('✅ 已通过 frame.click(body) 点击 YouTube frame: ' + ytFrameHandle.url());
+          }
+        } catch (e) {
+          console.log('⚠️ frame.click(body) 失败: ' + e.message.split('\n')[0]);
+        }
+      }
+
+      // 方案三：遍历所有匹配 iframe[src*="youtube"] 的元素，逐个点击中心坐标（兜底）
       if (!videoStarted) {
         try {
           const iframeLocators = page.locator('iframe[src*="youtube"]');
@@ -384,7 +412,7 @@ async function tryCloseAdPopup(page) {
         }
       }
 
-      // 方案三：兜底，针对非 iframe 的自定义播放按钮组件
+      // 方案四：兜底，针对常见的自定义播放按钮组件 class 名
       if (!videoStarted) {
         const videoPlayCandidates = [
           page.locator('button.lty-playbtn'),
