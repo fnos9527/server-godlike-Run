@@ -26,6 +26,37 @@ jobs:
       - name: 安装 Playwright 浏览器
         run: npx playwright install --with-deps chromium
 
+      # ===== 新增：下载并启动 Xray-core，将 VLESS 节点转为本地 Socks5 代理 =====
+      - name: 启动 Xray Socks5 代理
+        env:
+          VLESS_LINK: ${{ secrets.VLESS_LINK }}
+        run: |
+          # 下载 xray-core（静态二进制，无需安装）
+          XRAY_VERSION="1.8.11"
+          wget -q "https://github.com/XTLS/Xray-core/releases/download/v${XRAY_VERSION}/Xray-linux-64.zip" -O /tmp/xray.zip
+          unzip -q /tmp/xray.zip -d /tmp/xray
+          chmod +x /tmp/xray/xray
+
+          # 调用 Node.js 脚本解析 VLESS 链接，生成 xray 配置文件
+          node parse_vless.js "$VLESS_LINK" > /tmp/xray_config.json
+
+          # 打印配置供调试（不含敏感信息）
+          echo "✅ Xray 配置已生成，Socks5 监听端口: 10808"
+
+          # 后台启动 xray
+          /tmp/xray/xray run -c /tmp/xray_config.json &> /tmp/xray.log &
+          echo "XRAY_PID=$!" >> $GITHUB_ENV
+
+          # 等待 Socks5 端口就绪（最多等10秒）
+          for i in $(seq 1 10); do
+            if nc -z 127.0.0.1 10808 2>/dev/null; then
+              echo "✅ Xray Socks5 代理已就绪 (127.0.0.1:10808)"
+              break
+            fi
+            echo "等待 Xray 启动... ($i/10)"
+            sleep 1
+          done
+
       - name: 执行续期脚本
         env:
           PANEL_USERNAME: ${{ secrets.PANEL_USERNAME }}
@@ -34,12 +65,23 @@ jobs:
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
           AD_WAIT_SECONDS: '240'
-          # 可选：住宅代理，不配置就留空不会启用。如果 stealth 插件还是过不了 YouTube 的机器人验证，
-          # 建议配一个住宅代理（GitHub Actions 的数据中心 IP 容易被 YouTube 风控）
-          PROXY_SERVER: ${{ secrets.PROXY_SERVER }}
-          PROXY_USERNAME: ${{ secrets.PROXY_USERNAME }}
-          PROXY_PASSWORD: ${{ secrets.PROXY_PASSWORD }}
+          # 固定指向本地 Xray 转出的 Socks5 代理（由上一步启动）
+          # 如果没有配置 VLESS_LINK，这里的代理不会生效（parse_vless.js 会退出且不启动 xray）
+          PROXY_SERVER: 'socks5://127.0.0.1:10808'
+          PROXY_USERNAME: ''
+          PROXY_PASSWORD: ''
         run: node godlike_renew.js
+
+      - name: 停止 Xray 代理
+        if: always()
+        run: |
+          if [ -n "$XRAY_PID" ]; then
+            kill $XRAY_PID 2>/dev/null || true
+            echo "✅ Xray 已停止"
+          fi
+          # 打印 xray 日志便于排查问题
+          echo "===== Xray 日志 ====="
+          cat /tmp/xray.log 2>/dev/null || echo "(无日志)"
 
       - name: 上传截图(Artifact)
         if: always()
