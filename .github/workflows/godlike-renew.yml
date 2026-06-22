@@ -1,9 +1,10 @@
 name: GODLIKE 服务器自动续期
 
 on:
-  # 手动触发
+  # 每天早上 7:00 自动运行（UTC+8 的 7:00 = UTC 的 23:00 前一天）
+  schedule:
+    - cron: '0 23 * * *'
   workflow_dispatch: {}
-  # 供 cron-job.org 通过 repository_dispatch 远程触发
   repository_dispatch:
     types: [godlike-renew]
 
