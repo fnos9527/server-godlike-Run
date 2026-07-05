@@ -1,3 +1,4 @@
+godlike_renew.js
 // GODLIKE 面板服务器自动续期脚本
 // 流程：登录 -> 进入服务器详情页 -> 关闭可能出现的广告弹窗
 //      -> 点击 Renew -> 点击播放广告 -> 等待约240秒
@@ -369,27 +370,37 @@ async function tryCloseAdPopup(page) {
       }
 
       // 方案一：以视频标题文字为锚点，向上查找尺寸足够大的祖先容器（即整个缩略图区域），点击其中心
+      // 注意：这个标题是写死的固定文案（对应某一条具体广告），广告是轮播的，大概率匹配不上。
+      // 之前耗时长的原因是：anchor.boundingBox() 没写 timeout，Playwright 默认会等最多30秒才判定找不到，
+      // 循环最多8层，最坏情况 8 * 30s = 240秒全部浪费在这里。
+      // 现在先用 count()（不等待，立即返回）判断锚点文字是否存在，不存在就直接跳过，
+      // 存在的话也给 boundingBox 加一个很短的超时，避免继续卡住。
       try {
-        let anchor = page.getByText('TODO LO QUE DEBES SABER', { exact: false }).first();
-        let videoBox = null;
-        let foundLevel = -1;
-        for (let level = 0; level < 8; level++) {
-          const box = await anchor.boundingBox().catch(() => null);
-          if (box && box.width >= 400 && box.height >= 200) {
-            videoBox = box;
-            foundLevel = level;
-            break;
-          }
-          anchor = anchor.locator('xpath=..');
-        }
-        if (videoBox) {
-          await page.mouse.click(videoBox.x + videoBox.width / 2, videoBox.y + videoBox.height / 2);
-          videoStarted = true;
-          console.log(
-            `✅ 已点击视频缩略图区域（向上找了 ${foundLevel} 层），坐标 (${Math.round(videoBox.x + videoBox.width / 2)}, ${Math.round(videoBox.y + videoBox.height / 2)})，尺寸 ${Math.round(videoBox.width)}x${Math.round(videoBox.height)}`
-          );
+        const anchorCount = await page.getByText('TODO LO QUE DEBES SABER', { exact: false }).count();
+        if (anchorCount === 0) {
+          console.log('ℹ️ 未找到预设的视频标题文字（广告内容已轮换），跳过方案一，直接尝试方案二');
         } else {
-          console.log('⚠️ 没能找到足够大的缩略图容器（向上找了8层都不够大）');
+          let anchor = page.getByText('TODO LO QUE DEBES SABER', { exact: false }).first();
+          let videoBox = null;
+          let foundLevel = -1;
+          for (let level = 0; level < 8; level++) {
+            const box = await anchor.boundingBox({ timeout: 1500 }).catch(() => null);
+            if (box && box.width >= 400 && box.height >= 200) {
+              videoBox = box;
+              foundLevel = level;
+              break;
+            }
+            anchor = anchor.locator('xpath=..');
+          }
+          if (videoBox) {
+            await page.mouse.click(videoBox.x + videoBox.width / 2, videoBox.y + videoBox.height / 2);
+            videoStarted = true;
+            console.log(
+              `✅ 已点击视频缩略图区域（向上找了 ${foundLevel} 层），坐标 (${Math.round(videoBox.x + videoBox.width / 2)}, ${Math.round(videoBox.y + videoBox.height / 2)})，尺寸 ${Math.round(videoBox.width)}x${Math.round(videoBox.height)}`
+            );
+          } else {
+            console.log('⚠️ 没能找到足够大的缩略图容器（向上找了8层都不够大）');
+          }
         }
       } catch (e) {
         console.log('⚠️ 以标题文字定位缩略图失败: ' + e.message.split('\n')[0]);
@@ -480,22 +491,55 @@ async function tryCloseAdPopup(page) {
       await page.waitForTimeout(AD_WAIT_SECONDS * 1000);
       await shot(page, 'after_ad_wait');
 
-      // 广告播完后可能还有一个"领取/确认/关闭"按钮，尝试点一下（没有也不报错）
-      const claimCandidates = [
-        page.getByRole('button', { name: /claim/i }),
-        page.getByRole('button', { name: /confirm/i }),
-        page.getByRole('button', { name: /close/i }),
+      // 广告播完后会弹出 "Watch Video to Renew" 结果框（例如 "Great! You watched 150 seconds!"），
+      // 必须点击 "Get +12 Hours" 才会真正把奖励加到服务器上，不点的话续期后倒计时不会变化。
+      // 注意：弹窗里还有一个 "Continue For +24 Hours" 按钮，那个是继续多看一段视频换更多奖励，
+      // 不是我们要点的，下面的正则只会匹配 "Get ... 12 ... Hours"，不会误点到 "Continue"。
+      console.log('▶️ 第8.5步: 寻找并点击 "Get +12 Hours" 领取按钮...');
+      let claimedHours = false;
+      const getHoursCandidates = [
+        page.getByRole('button', { name: /get\s*\+?\s*12\s*hours/i }),
+        page.locator('button', { hasText: /get\s*\+?\s*12\s*hours/i }),
+        page.getByText(/get\s*\+?\s*12\s*hours/i, { exact: false }).locator('xpath=ancestor::button[1]'),
       ];
-      for (const cand of claimCandidates) {
-        try {
-          if (await cand.first().isVisible({ timeout: 2000 })) {
-            await cand.first().click({ timeout: 5000 });
-            console.log('✅ 已点击领取/确认按钮');
-            await page.waitForTimeout(2000);
-            break;
+      // 弹窗一般在等待结束时就已经出现（截图已确认），这里再轮询最多15秒兜底，防止弹窗延迟出现
+      for (let attempt = 0; attempt < 5 && !claimedHours; attempt++) {
+        for (const cand of getHoursCandidates) {
+          try {
+            if (await cand.first().isVisible({ timeout: 2000 })) {
+              await cand.first().click({ timeout: 5000 });
+              claimedHours = true;
+              console.log('✅ 已点击 "Get +12 Hours" 按钮，领取奖励');
+              await page.waitForTimeout(2000);
+              break;
+            }
+          } catch (e) {
+            // 继续尝试下一个候选
           }
-        } catch (e) {
-          // 没有这个按钮就跳过
+        }
+        if (!claimedHours) await page.waitForTimeout(1000);
+      }
+      await shot(page, claimedHours ? 'get_12_hours_clicked' : 'get_12_hours_not_found');
+
+      // 如果没找到 "Get +12 Hours"（比如弹窗样式变了），退回原来的通用"领取/确认/关闭"按钮兜底
+      if (!claimedHours) {
+        console.log('⚠️ 未找到 "Get +12 Hours" 按钮，尝试通用的领取/确认/关闭按钮兜底...');
+        const claimCandidates = [
+          page.getByRole('button', { name: /claim/i }),
+          page.getByRole('button', { name: /confirm/i }),
+          page.getByRole('button', { name: /close/i }),
+        ];
+        for (const cand of claimCandidates) {
+          try {
+            if (await cand.first().isVisible({ timeout: 2000 })) {
+              await cand.first().click({ timeout: 5000 });
+              console.log('✅ 已点击领取/确认按钮（兜底）');
+              await page.waitForTimeout(2000);
+              break;
+            }
+          } catch (e) {
+            // 没有这个按钮就跳过
+          }
         }
       }
 
