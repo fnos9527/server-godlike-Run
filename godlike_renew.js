@@ -369,21 +369,30 @@ async function tryCloseAdPopup(page) {
       }
 
       // 方案一：以视频标题文字为锚点，向上查找尺寸足够大的祖先容器（即整个缩略图区域），点击其中心
-      // 注意：这个标题是写死的固定文案（对应某一条具体广告），广告是轮播的，大概率匹配不上。
-      // 之前耗时长的原因是：anchor.boundingBox() 没写 timeout，Playwright 默认会等最多30秒才判定找不到，
-      // 循环最多8层，最坏情况 8 * 30s = 240秒全部浪费在这里。
-      // 现在先用 count()（不等待，立即返回）判断锚点文字是否存在，不存在就直接跳过，
-      // 存在的话也给 boundingBox 加一个很短的超时，避免继续卡住。
+      // 注意：这个标题文字是每条广告各自的，但目前遇到的这条广告用的就是这个文案，能匹配上。
+      // 这一步点击非常关键：真正的 YouTube iframe 是点了缩略图之后才会被注入到页面里的，
+      // 后面的方案二/三是找已经存在的 iframe，如果这一步没点成功，后面全部会找不到东西、视频根本不会播放。
+      //
+      // 之前的问题：用 count()（不等待、立即返回）判断文字存不存在，但广告弹窗的缩略图是异步渲染的，
+      // 有时候脚本检查的那一瞬间文字还没画出来，count() 就会误判"不存在"直接跳过，导致视频永远点不到。
+      // 现在改成 waitFor({state:'attached'})，最多等5秒让它真正渲染出来，比之前"不等直接判定不存在"更稳，
+      // 也远比最早"每层默认等30秒"要快（最多8层 * 短超时，而不是8层 * 30秒）。
       try {
-        const anchorCount = await page.getByText('TODO LO QUE DEBES SABER', { exact: false }).count();
-        if (anchorCount === 0) {
-          console.log('ℹ️ 未找到预设的视频标题文字（广告内容已轮换），跳过方案一，直接尝试方案二');
+        const anchor0 = page.getByText('TODO LO QUE DEBES SABER', { exact: false }).first();
+        let anchorExists = true;
+        try {
+          await anchor0.waitFor({ state: 'attached', timeout: 5000 });
+        } catch (e) {
+          anchorExists = false;
+        }
+        if (!anchorExists) {
+          console.log('ℹ️ 等待5秒仍未渲染出预设的视频标题文字（可能广告已更换），跳过方案一，尝试方案二');
         } else {
-          let anchor = page.getByText('TODO LO QUE DEBES SABER', { exact: false }).first();
+          let anchor = anchor0;
           let videoBox = null;
           let foundLevel = -1;
           for (let level = 0; level < 8; level++) {
-            const box = await anchor.boundingBox({ timeout: 1500 }).catch(() => null);
+            const box = await anchor.boundingBox({ timeout: 2000 }).catch(() => null);
             if (box && box.width >= 400 && box.height >= 200) {
               videoBox = box;
               foundLevel = level;
@@ -397,6 +406,8 @@ async function tryCloseAdPopup(page) {
             console.log(
               `✅ 已点击视频缩略图区域（向上找了 ${foundLevel} 层），坐标 (${Math.round(videoBox.x + videoBox.width / 2)}, ${Math.round(videoBox.y + videoBox.height / 2)})，尺寸 ${Math.round(videoBox.width)}x${Math.round(videoBox.height)}`
             );
+            // 点击后给页面一点时间真正把 YouTube iframe 注入进来，方案二/三才有东西可找
+            await page.waitForTimeout(2000);
           } else {
             console.log('⚠️ 没能找到足够大的缩略图容器（向上找了8层都不够大）');
           }
