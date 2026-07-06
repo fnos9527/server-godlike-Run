@@ -116,14 +116,23 @@ function sendTelegramPhoto(filePath, caption) {
   });
 }
 
-// ===== 时间字符串解析: "23h 10m 52s" -> 秒数 =====
+// ===== 时间字符串解析: "1d 22h 10m 52s" -> 秒数 =====
+// 注意：之前这里漏掉了"天"(d)这个单位，导致像 "1d 22h 9m" 这种续期后跨天的倒计时，
+// "1d" 被完全忽略，只按 22h9m 计算，比实际少了整整86400秒（1天），
+// 结果会误判成"续期后时间比续期前还少"，进而错误地报"可能没有续期成功"。
 function parseDurationToSeconds(text) {
   if (!text) return null;
+  const d = /(\d+)\s*d/i.exec(text);
   const h = /(\d+)\s*h/i.exec(text);
   const m = /(\d+)\s*m/i.exec(text);
   const s = /(\d+)\s*s/i.exec(text);
-  if (!h && !m && !s) return null;
-  return (h ? parseInt(h[1], 10) * 3600 : 0) + (m ? parseInt(m[1], 10) * 60 : 0) + (s ? parseInt(s[1], 10) : 0);
+  if (!d && !h && !m && !s) return null;
+  return (
+    (d ? parseInt(d[1], 10) * 86400 : 0) +
+    (h ? parseInt(h[1], 10) * 3600 : 0) +
+    (m ? parseInt(m[1], 10) * 60 : 0) +
+    (s ? parseInt(s[1], 10) : 0)
+  );
 }
 
 function formatSeconds(total) {
