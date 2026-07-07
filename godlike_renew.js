@@ -312,289 +312,277 @@ async function tryCloseAdPopup(page) {
     console.log(`📋 续期前倒计时: ${beforeText}`);
     const beforeSeconds = parseDurationToSeconds(beforeText);
 
-    // "Video will be available in ..." 是广告冷却提示，如果还没冷却完就不要点 Renew
-    let cooldownText = '';
+    // 不再检测广告冷却时间提示，直接尝试续期；
+    // 冷却与否交给续期按钮/广告播放流程自己处理，脚本只负责对比续期前后剩余时间
+    // ===== 第6步：点击 Renew 按钮 =====
+    console.log('▶️ 第6步: 点击 Renew 按钮...');
+    await tryDismissOnboardingTour(page); // 保险起见再关一次，防止引导层重新出现挡住点击
     try {
-      cooldownText = (await page.getByText(/Video will be available in/i).first().innerText({ timeout: 3000 })).trim();
+      // 限定只匹配真正的 <button>，避免匹配到 "Renew Server" 标题文字
+      await page.getByRole('button', { name: /^renew$/i }).first().click({ timeout: 15000 });
     } catch (e) {
-      // 没有这个提示，说明现在可以续期
+      await page.locator('button:has-text("Renew")').first().click({ timeout: 15000 });
+    }
+    await page.waitForTimeout(2000);
+    await shot(page, 'clicked_renew');
+
+    // ===== 第7步：在弹出框中点击播放广告 =====
+    console.log('▶️ 第7步: 寻找并点击播放广告按钮...');
+    const playAdCandidates = [
+      page.getByRole('button', { name: /watch/i }),
+      page.getByRole('button', { name: /play/i }),
+      page.getByText(/watch ad/i),
+      page.getByText(/play ad/i),
+    ];
+    let played = false;
+    for (const cand of playAdCandidates) {
+      try {
+        if (await cand.first().isVisible({ timeout: 2000 })) {
+          await cand.first().click({ timeout: 5000 });
+          played = true;
+          console.log('✅ 已点击播放广告按钮');
+          break;
+        }
+      } catch (e) {
+        // 继续尝试下一个候选
+      }
+    }
+    await shot(page, played ? 'ad_play_clicked' : 'ad_play_button_not_found');
+
+    // ===== 第7.5步：在 "Watch Video to Renew" 弹窗中点击视频缩略图中间的真正播放按钮 =====
+    // 已确认这个视频不是真正的 YouTube iframe（page.frames() 里没有任何 youtube.com 的 frame），
+    // 而是纯 HTML/CSS 做的假缩略图（点击后才会真正注入播放）。
+    // 思路改成：用视频标题这段唯一可见文字定位，再一层层往上找父容器，
+    // 找到第一个"宽高足够大、看起来是整个缩略图"的容器，点它的正中心。
+    console.log('▶️ 第7.5步: 点击视频开始播放...');
+    let videoStarted = false;
+
+    // 诊断信息：打印页面当前所有 frame 的地址，留着方便确认
+    try {
+      const allFrames = page.frames();
+      console.log(`ℹ️ 当前页面共有 ${allFrames.length} 个 frame:`);
+      allFrames.forEach((f, i) => console.log(`   [${i}] ${f.url() || '(空白frame)'}`));
+    } catch (e) {
+      // 忽略
     }
 
-    if (cooldownText && !/0h\s*0m\s*0s/i.test(cooldownText)) {
-      resultMessage = `⏳ 还未到可续期时间\n冷却提示: ${cooldownText}\n服务器剩余: ${beforeText}`;
-      console.log(resultMessage);
-      await shot(page, 'still_in_cooldown');
-    } else {
-      // ===== 第6步：点击 Renew 按钮 =====
-      console.log('▶️ 第6步: 点击 Renew 按钮...');
-      await tryDismissOnboardingTour(page); // 保险起见再关一次，防止引导层重新出现挡住点击
+    // 方案一：以视频标题文字为锚点，向上查找尺寸足够大的祖先容器（即整个缩略图区域），点击其中心
+    // 注意：这个标题文字是每条广告各自的，但目前遇到的这条广告用的就是这个文案，能匹配上。
+    // 这一步点击非常关键：真正的 YouTube iframe 是点了缩略图之后才会被注入到页面里的，
+    // 后面的方案二/三是找已经存在的 iframe，如果这一步没点成功，后面全部会找不到东西、视频根本不会播放。
+    //
+    // 之前的问题：用 count()（不等待、立即返回）判断文字存不存在，但广告弹窗的缩略图是异步渲染的，
+    // 有时候脚本检查的那一瞬间文字还没画出来，count() 就会误判"不存在"直接跳过，导致视频永远点不到。
+    // 现在改成 waitFor({state:'attached'})，最多等5秒让它真正渲染出来，比之前"不等直接判定不存在"更稳，
+    // 也远比最早"每层默认等30秒"要快（最多8层 * 短超时，而不是8层 * 30秒）。
+    try {
+      const anchor0 = page.getByText('TODO LO QUE DEBES SABER', { exact: false }).first();
+      let anchorExists = true;
       try {
-        // 限定只匹配真正的 <button>，避免匹配到 "Renew Server" 标题文字
-        await page.getByRole('button', { name: /^renew$/i }).first().click({ timeout: 15000 });
+        await anchor0.waitFor({ state: 'attached', timeout: 5000 });
       } catch (e) {
-        await page.locator('button:has-text("Renew")').first().click({ timeout: 15000 });
+        anchorExists = false;
       }
-      await page.waitForTimeout(2000);
-      await shot(page, 'clicked_renew');
+      if (!anchorExists) {
+        console.log('ℹ️ 等待5秒仍未渲染出预设的视频标题文字（可能广告已更换），跳过方案一，尝试方案二');
+      } else {
+        let anchor = anchor0;
+        let videoBox = null;
+        let foundLevel = -1;
+        for (let level = 0; level < 8; level++) {
+          const box = await anchor.boundingBox({ timeout: 2000 }).catch(() => null);
+          if (box && box.width >= 400 && box.height >= 200) {
+            videoBox = box;
+            foundLevel = level;
+            break;
+          }
+          anchor = anchor.locator('xpath=..');
+        }
+        if (videoBox) {
+          await page.mouse.click(videoBox.x + videoBox.width / 2, videoBox.y + videoBox.height / 2);
+          videoStarted = true;
+          console.log(
+            `✅ 已点击视频缩略图区域（向上找了 ${foundLevel} 层），坐标 (${Math.round(videoBox.x + videoBox.width / 2)}, ${Math.round(videoBox.y + videoBox.height / 2)})，尺寸 ${Math.round(videoBox.width)}x${Math.round(videoBox.height)}`
+          );
+          // 点击后给页面一点时间真正把 YouTube iframe 注入进来，方案二/三才有东西可找
+          await page.waitForTimeout(2000);
+        } else {
+          console.log('⚠️ 没能找到足够大的缩略图容器（向上找了8层都不够大）');
+        }
+      }
+    } catch (e) {
+      console.log('⚠️ 以标题文字定位缩略图失败: ' + e.message.split('\n')[0]);
+    }
 
-      // ===== 第7步：在弹出框中点击播放广告 =====
-      console.log('▶️ 第7步: 寻找并点击播放广告按钮...');
-      const playAdCandidates = [
-        page.getByRole('button', { name: /watch/i }),
-        page.getByRole('button', { name: /play/i }),
-        page.getByText(/watch ad/i),
-        page.getByText(/play ad/i),
+    // 方案二：如果方案一没找到视频标题文字（比如视频换了），尝试找 YouTube frame（万一点了之后才会出现）
+    if (!videoStarted) {
+      try {
+        const ytFrameHandle = page.frames().find((f) => /youtube/i.test(f.url()));
+        if (ytFrameHandle) {
+          await ytFrameHandle.click('body', { timeout: 8000 });
+          videoStarted = true;
+          console.log('✅ 已通过 frame.click(body) 点击 YouTube frame: ' + ytFrameHandle.url());
+        }
+      } catch (e) {
+        console.log('⚠️ frame.click(body) 失败: ' + e.message.split('\n')[0]);
+      }
+    }
+
+    // 方案三：遍历所有匹配 iframe[src*="youtube"] 的元素，逐个点击中心坐标（兜底）
+    if (!videoStarted) {
+      try {
+        const iframeLocators = page.locator('iframe[src*="youtube"]');
+        const count = await iframeLocators.count();
+        console.log(`ℹ️ 找到 ${count} 个 iframe[src*="youtube"]，逐个尝试点击`);
+        for (let i = 0; i < count; i++) {
+          const el = iframeLocators.nth(i);
+          const box = await el.boundingBox().catch(() => null);
+          if (box) {
+            console.log(`   [${i}] 坐标 (${Math.round(box.x + box.width / 2)}, ${Math.round(box.y + box.height / 2)}) 尺寸 ${Math.round(box.width)}x${Math.round(box.height)}`);
+            await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
+            await page.waitForTimeout(1000);
+          } else {
+            console.log(`   [${i}] 不可见，跳过`);
+          }
+        }
+        videoStarted = count > 0;
+      } catch (e) {
+        console.log('⚠️ 遍历点击 iframe 失败: ' + e.message);
+      }
+    }
+
+    // 方案四：兜底，针对常见的自定义播放按钮组件 class 名
+    if (!videoStarted) {
+      const videoPlayCandidates = [
+        page.locator('button.lty-playbtn'),
+        page.locator('[class*="lty-playbtn" i]'),
+        page.locator('lite-youtube'),
+        page.locator('[aria-label="Play" i]'),
+        page.locator('[class*="play-button" i]'),
+        page.locator('[class*="play-btn" i]'),
       ];
-      let played = false;
-      for (const cand of playAdCandidates) {
+      for (const cand of videoPlayCandidates) {
         try {
-          if (await cand.first().isVisible({ timeout: 2000 })) {
-            await cand.first().click({ timeout: 5000 });
-            played = true;
-            console.log('✅ 已点击播放广告按钮');
+          const el = cand.first();
+          if (await el.isVisible({ timeout: 2000 })) {
+            await el.click({ timeout: 5000 });
+            videoStarted = true;
+            console.log('✅ 已点击视频播放按钮（兜底选择器）');
             break;
           }
         } catch (e) {
           // 继续尝试下一个候选
         }
       }
-      await shot(page, played ? 'ad_play_clicked' : 'ad_play_button_not_found');
-
-      // ===== 第7.5步：在 "Watch Video to Renew" 弹窗中点击视频缩略图中间的真正播放按钮 =====
-      // 已确认这个视频不是真正的 YouTube iframe（page.frames() 里没有任何 youtube.com 的 frame），
-      // 而是纯 HTML/CSS 做的假缩略图（点击后才会真正注入播放）。
-      // 思路改成：用视频标题这段唯一可见文字定位，再一层层往上找父容器，
-      // 找到第一个"宽高足够大、看起来是整个缩略图"的容器，点它的正中心。
-      console.log('▶️ 第7.5步: 点击视频开始播放...');
-      let videoStarted = false;
-
-      // 诊断信息：打印页面当前所有 frame 的地址，留着方便确认
-      try {
-        const allFrames = page.frames();
-        console.log(`ℹ️ 当前页面共有 ${allFrames.length} 个 frame:`);
-        allFrames.forEach((f, i) => console.log(`   [${i}] ${f.url() || '(空白frame)'}`));
-      } catch (e) {
-        // 忽略
-      }
-
-      // 方案一：以视频标题文字为锚点，向上查找尺寸足够大的祖先容器（即整个缩略图区域），点击其中心
-      // 注意：这个标题文字是每条广告各自的，但目前遇到的这条广告用的就是这个文案，能匹配上。
-      // 这一步点击非常关键：真正的 YouTube iframe 是点了缩略图之后才会被注入到页面里的，
-      // 后面的方案二/三是找已经存在的 iframe，如果这一步没点成功，后面全部会找不到东西、视频根本不会播放。
-      //
-      // 之前的问题：用 count()（不等待、立即返回）判断文字存不存在，但广告弹窗的缩略图是异步渲染的，
-      // 有时候脚本检查的那一瞬间文字还没画出来，count() 就会误判"不存在"直接跳过，导致视频永远点不到。
-      // 现在改成 waitFor({state:'attached'})，最多等5秒让它真正渲染出来，比之前"不等直接判定不存在"更稳，
-      // 也远比最早"每层默认等30秒"要快（最多8层 * 短超时，而不是8层 * 30秒）。
-      try {
-        const anchor0 = page.getByText('TODO LO QUE DEBES SABER', { exact: false }).first();
-        let anchorExists = true;
-        try {
-          await anchor0.waitFor({ state: 'attached', timeout: 5000 });
-        } catch (e) {
-          anchorExists = false;
-        }
-        if (!anchorExists) {
-          console.log('ℹ️ 等待5秒仍未渲染出预设的视频标题文字（可能广告已更换），跳过方案一，尝试方案二');
-        } else {
-          let anchor = anchor0;
-          let videoBox = null;
-          let foundLevel = -1;
-          for (let level = 0; level < 8; level++) {
-            const box = await anchor.boundingBox({ timeout: 2000 }).catch(() => null);
-            if (box && box.width >= 400 && box.height >= 200) {
-              videoBox = box;
-              foundLevel = level;
-              break;
-            }
-            anchor = anchor.locator('xpath=..');
-          }
-          if (videoBox) {
-            await page.mouse.click(videoBox.x + videoBox.width / 2, videoBox.y + videoBox.height / 2);
-            videoStarted = true;
-            console.log(
-              `✅ 已点击视频缩略图区域（向上找了 ${foundLevel} 层），坐标 (${Math.round(videoBox.x + videoBox.width / 2)}, ${Math.round(videoBox.y + videoBox.height / 2)})，尺寸 ${Math.round(videoBox.width)}x${Math.round(videoBox.height)}`
-            );
-            // 点击后给页面一点时间真正把 YouTube iframe 注入进来，方案二/三才有东西可找
-            await page.waitForTimeout(2000);
-          } else {
-            console.log('⚠️ 没能找到足够大的缩略图容器（向上找了8层都不够大）');
-          }
-        }
-      } catch (e) {
-        console.log('⚠️ 以标题文字定位缩略图失败: ' + e.message.split('\n')[0]);
-      }
-
-      // 方案二：如果方案一没找到视频标题文字（比如视频换了），尝试找 YouTube frame（万一点了之后才会出现）
-      if (!videoStarted) {
-        try {
-          const ytFrameHandle = page.frames().find((f) => /youtube/i.test(f.url()));
-          if (ytFrameHandle) {
-            await ytFrameHandle.click('body', { timeout: 8000 });
-            videoStarted = true;
-            console.log('✅ 已通过 frame.click(body) 点击 YouTube frame: ' + ytFrameHandle.url());
-          }
-        } catch (e) {
-          console.log('⚠️ frame.click(body) 失败: ' + e.message.split('\n')[0]);
-        }
-      }
-
-      // 方案三：遍历所有匹配 iframe[src*="youtube"] 的元素，逐个点击中心坐标（兜底）
-      if (!videoStarted) {
-        try {
-          const iframeLocators = page.locator('iframe[src*="youtube"]');
-          const count = await iframeLocators.count();
-          console.log(`ℹ️ 找到 ${count} 个 iframe[src*="youtube"]，逐个尝试点击`);
-          for (let i = 0; i < count; i++) {
-            const el = iframeLocators.nth(i);
-            const box = await el.boundingBox().catch(() => null);
-            if (box) {
-              console.log(`   [${i}] 坐标 (${Math.round(box.x + box.width / 2)}, ${Math.round(box.y + box.height / 2)}) 尺寸 ${Math.round(box.width)}x${Math.round(box.height)}`);
-              await page.mouse.click(box.x + box.width / 2, box.y + box.height / 2);
-              await page.waitForTimeout(1000);
-            } else {
-              console.log(`   [${i}] 不可见，跳过`);
-            }
-          }
-          videoStarted = count > 0;
-        } catch (e) {
-          console.log('⚠️ 遍历点击 iframe 失败: ' + e.message);
-        }
-      }
-
-      // 方案四：兜底，针对常见的自定义播放按钮组件 class 名
-      if (!videoStarted) {
-        const videoPlayCandidates = [
-          page.locator('button.lty-playbtn'),
-          page.locator('[class*="lty-playbtn" i]'),
-          page.locator('lite-youtube'),
-          page.locator('[aria-label="Play" i]'),
-          page.locator('[class*="play-button" i]'),
-          page.locator('[class*="play-btn" i]'),
-        ];
-        for (const cand of videoPlayCandidates) {
-          try {
-            const el = cand.first();
-            if (await el.isVisible({ timeout: 2000 })) {
-              await el.click({ timeout: 5000 });
-              videoStarted = true;
-              console.log('✅ 已点击视频播放按钮（兜底选择器）');
-              break;
-            }
-          } catch (e) {
-            // 继续尝试下一个候选
-          }
-        }
-      }
-      await page.waitForTimeout(3000);
-      await shot(page, videoStarted ? 'video_play_clicked' : 'video_play_not_found');
-
-      // 验证视频是否真的在播放：对比几秒间隔内的播放进度百分比是否在变化
-      // 注意：页面顶部促销横幅里也有"-50%"这种带百分号的文字，必须把搜索范围限定在 "Watch the video" 这句话附近，
-      // 避免像上次一样误抓到横幅文字
-      try {
-        const progressArea = page.getByText(/Watch the video for \d+ seconds/i).first().locator('xpath=preceding-sibling::*[1]');
-        const progress1 = (await progressArea.innerText({ timeout: 4000 })).trim();
-        await page.waitForTimeout(8000);
-        const progress2 = (await progressArea.innerText({ timeout: 4000 })).trim();
-        console.log(`📊 播放进度检测: ${progress1} -> ${progress2}`);
-        if (progress1 === progress2) {
-          console.log('⚠️ 警告：播放进度没有变化，视频可能没有真正开始播放！');
-        }
-      } catch (e) {
-        console.log('⚠️ 未能读取播放进度百分比，跳过该项检测: ' + e.message);
-      }
-
-      // ===== 第8步：等待广告播放约240秒 =====
-      console.log(`▶️ 第8步: 等待广告播放 ${AD_WAIT_SECONDS} 秒...`);
-      await page.waitForTimeout(AD_WAIT_SECONDS * 1000);
-      await shot(page, 'after_ad_wait');
-
-      // 广告播完后会弹出 "Watch Video to Renew" 结果框（例如 "Great! You watched 150 seconds!"），
-      // 必须点击 "Get +12 Hours" 才会真正把奖励加到服务器上，不点的话续期后倒计时不会变化。
-      // 注意：弹窗里还有一个 "Continue For +24 Hours" 按钮，那个是继续多看一段视频换更多奖励，
-      // 不是我们要点的，下面的正则只会匹配 "Get ... 12 ... Hours"，不会误点到 "Continue"。
-      console.log('▶️ 第8.5步: 寻找并点击 "Get +12 Hours" 领取按钮...');
-      let claimedHours = false;
-      const getHoursCandidates = [
-        page.getByRole('button', { name: /get\s*\+?\s*12\s*hours/i }),
-        page.locator('button', { hasText: /get\s*\+?\s*12\s*hours/i }),
-        page.getByText(/get\s*\+?\s*12\s*hours/i, { exact: false }).locator('xpath=ancestor::button[1]'),
-      ];
-      // 弹窗一般在等待结束时就已经出现（截图已确认），这里再轮询最多15秒兜底，防止弹窗延迟出现
-      for (let attempt = 0; attempt < 5 && !claimedHours; attempt++) {
-        for (const cand of getHoursCandidates) {
-          try {
-            if (await cand.first().isVisible({ timeout: 2000 })) {
-              await cand.first().click({ timeout: 5000 });
-              claimedHours = true;
-              console.log('✅ 已点击 "Get +12 Hours" 按钮，领取奖励');
-              await page.waitForTimeout(2000);
-              break;
-            }
-          } catch (e) {
-            // 继续尝试下一个候选
-          }
-        }
-        if (!claimedHours) await page.waitForTimeout(1000);
-      }
-      await shot(page, claimedHours ? 'get_12_hours_clicked' : 'get_12_hours_not_found');
-
-      // 如果没找到 "Get +12 Hours"（比如弹窗样式变了），退回原来的通用"领取/确认/关闭"按钮兜底
-      if (!claimedHours) {
-        console.log('⚠️ 未找到 "Get +12 Hours" 按钮，尝试通用的领取/确认/关闭按钮兜底...');
-        const claimCandidates = [
-          page.getByRole('button', { name: /claim/i }),
-          page.getByRole('button', { name: /confirm/i }),
-          page.getByRole('button', { name: /close/i }),
-        ];
-        for (const cand of claimCandidates) {
-          try {
-            if (await cand.first().isVisible({ timeout: 2000 })) {
-              await cand.first().click({ timeout: 5000 });
-              console.log('✅ 已点击领取/确认按钮（兜底）');
-              await page.waitForTimeout(2000);
-              break;
-            }
-          } catch (e) {
-            // 没有这个按钮就跳过
-          }
-        }
-      }
-
-      // 刷新确保倒计时是最新数据，并等待页面真正渲染出内容后再截图（避免截到加载圈）
-      await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
-      try {
-        await page.getByText(/will be suspended in/i).first().waitFor({ state: 'visible', timeout: 20000 });
-      } catch (e) {
-        console.log('⚠️ 刷新后等待倒计时元素超时，可能页面加载较慢: ' + e.message);
-      }
-      await page.waitForTimeout(1500);
-      await shot(page, 'final_state');
-
-      // ===== 第9步：读取续期后的倒计时并对比 =====
-      let afterText = '';
-      try {
-        afterText = (await page.getByText(/will be suspended in/i).first().innerText({ timeout: 10000 })).trim();
-      } catch (e) {
-        console.log('⚠️ 未能读取续期后的倒计时文本: ' + e.message);
-      }
-      console.log(`📋 续期后倒计时: ${afterText}`);
-      const afterSeconds = parseDurationToSeconds(afterText);
-
-      if (beforeSeconds !== null && afterSeconds !== null) {
-        const diff = afterSeconds - beforeSeconds;
-        if (diff > 0) {
-          renewSucceeded = true;
-          resultMessage = `✅ 续期成功！\n续期前: ${beforeText}\n续期后: ${afterText}\n增加了: ${formatSeconds(diff)}`;
-        } else {
-          resultMessage = `⚠️ 续期后时间未增加，可能没有续期成功\n续期前: ${beforeText}\n续期后: ${afterText}`;
-        }
-      } else {
-        resultMessage = `⚠️ 无法准确读取倒计时进行比较\n续期前文本: ${beforeText || '未获取到'}\n续期后文本: ${afterText || '未获取到'}`;
-      }
-      console.log(resultMessage);
     }
+    await page.waitForTimeout(3000);
+    await shot(page, videoStarted ? 'video_play_clicked' : 'video_play_not_found');
+
+    // 验证视频是否真的在播放：对比几秒间隔内的播放进度百分比是否在变化
+    // 注意：页面顶部促销横幅里也有"-50%"这种带百分号的文字，必须把搜索范围限定在 "Watch the video" 这句话附近，
+    // 避免像上次一样误抓到横幅文字
+    try {
+      const progressArea = page.getByText(/Watch the video for \d+ seconds/i).first().locator('xpath=preceding-sibling::*[1]');
+      const progress1 = (await progressArea.innerText({ timeout: 4000 })).trim();
+      await page.waitForTimeout(8000);
+      const progress2 = (await progressArea.innerText({ timeout: 4000 })).trim();
+      console.log(`📊 播放进度检测: ${progress1} -> ${progress2}`);
+      if (progress1 === progress2) {
+        console.log('⚠️ 警告：播放进度没有变化，视频可能没有真正开始播放！');
+      }
+    } catch (e) {
+      console.log('⚠️ 未能读取播放进度百分比，跳过该项检测: ' + e.message);
+    }
+
+    // ===== 第8步：等待广告播放约240秒 =====
+    console.log(`▶️ 第8步: 等待广告播放 ${AD_WAIT_SECONDS} 秒...`);
+    await page.waitForTimeout(AD_WAIT_SECONDS * 1000);
+    await shot(page, 'after_ad_wait');
+
+    // 广告播完后会弹出 "Watch Video to Renew" 结果框（例如 "Great! You watched 150 seconds!"），
+    // 必须点击 "Get +12 Hours" 才会真正把奖励加到服务器上，不点的话续期后倒计时不会变化。
+    // 注意：弹窗里还有一个 "Continue For +24 Hours" 按钮，那个是继续多看一段视频换更多奖励，
+    // 不是我们要点的，下面的正则只会匹配 "Get ... 12 ... Hours"，不会误点到 "Continue"。
+    console.log('▶️ 第8.5步: 寻找并点击 "Get +12 Hours" 领取按钮...');
+    let claimedHours = false;
+    const getHoursCandidates = [
+      page.getByRole('button', { name: /get\s*\+?\s*12\s*hours/i }),
+      page.locator('button', { hasText: /get\s*\+?\s*12\s*hours/i }),
+      page.getByText(/get\s*\+?\s*12\s*hours/i, { exact: false }).locator('xpath=ancestor::button[1]'),
+    ];
+    // 弹窗一般在等待结束时就已经出现（截图已确认），这里再轮询最多15秒兜底，防止弹窗延迟出现
+    for (let attempt = 0; attempt < 5 && !claimedHours; attempt++) {
+      for (const cand of getHoursCandidates) {
+        try {
+          if (await cand.first().isVisible({ timeout: 2000 })) {
+            await cand.first().click({ timeout: 5000 });
+            claimedHours = true;
+            console.log('✅ 已点击 "Get +12 Hours" 按钮，领取奖励');
+            await page.waitForTimeout(2000);
+            break;
+          }
+        } catch (e) {
+          // 继续尝试下一个候选
+        }
+      }
+      if (!claimedHours) await page.waitForTimeout(1000);
+    }
+    await shot(page, claimedHours ? 'get_12_hours_clicked' : 'get_12_hours_not_found');
+
+    // 如果没找到 "Get +12 Hours"（比如弹窗样式变了），退回原来的通用"领取/确认/关闭"按钮兜底
+    if (!claimedHours) {
+      console.log('⚠️ 未找到 "Get +12 Hours" 按钮，尝试通用的领取/确认/关闭按钮兜底...');
+      const claimCandidates = [
+        page.getByRole('button', { name: /claim/i }),
+        page.getByRole('button', { name: /confirm/i }),
+        page.getByRole('button', { name: /close/i }),
+      ];
+      for (const cand of claimCandidates) {
+        try {
+          if (await cand.first().isVisible({ timeout: 2000 })) {
+            await cand.first().click({ timeout: 5000 });
+            console.log('✅ 已点击领取/确认按钮（兜底）');
+            await page.waitForTimeout(2000);
+            break;
+          }
+        } catch (e) {
+          // 没有这个按钮就跳过
+        }
+      }
+    }
+
+    // 刷新确保倒计时是最新数据，并等待页面真正渲染出内容后再截图（避免截到加载圈）
+    await page.reload({ waitUntil: 'domcontentloaded', timeout: 30000 }).catch(() => {});
+    try {
+      await page.getByText(/will be suspended in/i).first().waitFor({ state: 'visible', timeout: 20000 });
+    } catch (e) {
+      console.log('⚠️ 刷新后等待倒计时元素超时，可能页面加载较慢: ' + e.message);
+    }
+    await page.waitForTimeout(1500);
+    await shot(page, 'final_state');
+
+    // ===== 第9步：读取续期后的倒计时并对比 =====
+    let afterText = '';
+    try {
+      afterText = (await page.getByText(/will be suspended in/i).first().innerText({ timeout: 10000 })).trim();
+    } catch (e) {
+      console.log('⚠️ 未能读取续期后的倒计时文本: ' + e.message);
+    }
+    console.log(`📋 续期后倒计时: ${afterText}`);
+    const afterSeconds = parseDurationToSeconds(afterText);
+
+    if (beforeSeconds !== null && afterSeconds !== null) {
+      const diff = afterSeconds - beforeSeconds;
+      if (diff > 0) {
+        renewSucceeded = true;
+        resultMessage = `✅ 续期成功！\n续期前: ${beforeText}\n续期后: ${afterText}\n增加了: ${formatSeconds(diff)}`;
+      } else {
+        resultMessage = `⚠️ 续期后时间未增加，可能没有续期成功\n续期前: ${beforeText}\n续期后: ${afterText}`;
+      }
+    } else {
+      resultMessage = `⚠️ 无法准确读取倒计时进行比较\n续期前文本: ${beforeText || '未获取到'}\n续期后文本: ${afterText || '未获取到'}`;
+    }
+    console.log(resultMessage);
   } catch (err) {
     resultMessage = `❌ 续期流程出现异常: ${err.message}`;
     console.error(resultMessage);
